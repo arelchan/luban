@@ -1,0 +1,37 @@
+[project]
+name = "agentkit"
+version = "0.1.0"
+description = "A modular CLI agent framework"
+requires-python = ">=3.11"
+dependencies = [
+    "litellm>=1.40",
+    "httpx>=0.27",
+    "mcp>=1.0",
+    "pydantic>=2.0",
+    "rich>=13.0",
+    "prompt-toolkit>=3.0",
+    "watchdog>=4.0",
+    "tenacity>=8.0",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+luban = "agentkit.cli.app:cli_entry"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentkit"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100

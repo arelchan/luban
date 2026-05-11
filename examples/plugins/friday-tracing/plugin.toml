@@ -1,0 +1,24 @@
+[plugin]
+name = "friday-tracing"
+version = "1.0.0"
+description = "上报 Luban trace 数据到 Friday 平台（仅限美团内网）"
+enabled = true
+
+[config]
+# 必填：Friday 应用工厂的 Agent 身份 ID
+# 获取方式：https://aigc.sankuai.com/app/appList/appListV2List → 找到你的 Agent → 复制「身份 ID」
+agent_id = ""
+
+# 必填：OAuth 鉴权凭证（从 Friday 服务管理获取）
+# 获取方式：https://friday.sankuai.com/budget/serviceManage → 找到服务 → 复制 App Key 和 Secret Key
+client_id = ""      # App Key
+client_secret = ""  # Secret Key
+
+# 可选：Friday 平台地址（默认内网地址，一般不需要改）
+base_url = "https://aigc.sankuai.com"
+
+# 可选：单次上报超时（毫秒）
+timeout_ms = 5000
+
+# 可选：上报失败时是否打印警告
+log_errors = true

@@ -1,0 +1,8 @@
+[plugin]
+name = "hello-plugin"
+version = "1.0.0"
+description = "最简示例插件，打印每个 span 的类型和耗时"
+enabled = true
+
+[config]
+# 无额外配置
