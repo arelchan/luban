@@ -155,16 +155,16 @@ class TestBuiltinTools:
         from agentkit.tools.builtin import read_file
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("a\nb\nc\nd\ne\n")
+            f.write("ALPHA\nBRAVO\nCHARLIE\nDELTA\nECHO\n")
             f.flush()
             path = f.name
 
         try:
             result = read_file(path, offset=2, limit=2)
-            assert "c" in result
-            assert "d" in result
-            assert "a" not in result
-            assert "e" not in result
+            assert "CHARLIE" in result
+            assert "DELTA" in result
+            assert "ALPHA" not in result
+            assert "ECHO" not in result
         finally:
             os.unlink(path)
 

@@ -53,6 +53,7 @@ class ContextWatcher:
         skills: list | None = None,
         on_reload: callable | None = None,
         memory_store=None,  # agentkit.memory.store.MemoryStore | None — used to re-read profile on reload
+        model_name: str | None = None,
     ):
         self._loader = loader
         self._injector = injector
@@ -61,6 +62,7 @@ class ContextWatcher:
         self._skills = skills
         self._on_reload = on_reload
         self._memory_store = memory_store
+        self._model_name = model_name
         self._observer: Observer | None = None
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._consumer_task: asyncio.Task | None = None
@@ -93,7 +95,7 @@ class ContextWatcher:
                 # Reload all context and re-inject (preserve tool guide + profile)
                 context = self._loader.load_all()
                 profile_text = self._memory_store.to_context_string("profile") if self._memory_store else None
-                self._injector.inject(context, self._memory, tools=self._tools, skills=self._skills, profile_text=profile_text)
+                self._injector.inject(context, self._memory, tools=self._tools, skills=self._skills, profile_text=profile_text, model_name=self._model_name)
                 from agentkit.audit import audit as _audit
                 from pathlib import Path as _Path
                 _audit("context.loader", "context.reload", data={"file": _Path(changed_path).name})

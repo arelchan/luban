@@ -128,6 +128,12 @@ class Renderer:
         )
         self.console.print(panel)
 
+    # ─── User message ─────────────────────────────────────────────────────
+
+    def show_user_message(self, text: str) -> None:
+        """Display user message in conversation (no-op in classic mode, prompt already shows it)."""
+        pass
+
     # ─── System events (unified icon style) ──────────────────────────────
 
     def show_spinner(self, message: str) -> None:
@@ -462,24 +468,35 @@ class Renderer:
         """Replay recent turns in the same visual style as live conversation."""
         _lang = lang or self.lang
 
+        def _is_real_user_msg(content: str) -> bool:
+            """Only real user input has [YYYY-MM-DD HH:MM] prefix."""
+            if not content.startswith("["):
+                return False
+            if "] " not in content[:25]:
+                return False
+            inner = content[1:content.index("] ")]
+            # Must look like a timestamp (e.g. "2025-01-01 12:00"), not "[SYSTEM ...]"
+            return len(inner) >= 10 and inner[4:5] == "-"
+
         # Collect (user_text, assistant_text) pairs
-        # assistant_text = last non-empty assistant message before the next user message
-        # (handles turns with tool calls: first assistant msg may be empty, final reply is last)
+        # Skips system-event user messages (e.g. [SYSTEM ...] plugin notifications)
         turns: list[tuple[str, str]] = []
         i = 0
         while i < len(messages):
             msg = messages[i]
             role = msg.role if hasattr(msg, "role") else msg.get("role", "")
             content = msg.content if hasattr(msg, "content") else msg.get("content", "")
-            if role == "user" and content and isinstance(content, str):
-                user_text = content
+            if role == "user" and content and isinstance(content, str) and _is_real_user_msg(content):
+                # Strip timestamp prefix
+                user_text = content[content.index("] ") + 2:]
                 assistant_text = ""
                 j = i + 1
                 while j < len(messages):
                     next_msg = messages[j]
                     next_role = next_msg.role if hasattr(next_msg, "role") else next_msg.get("role", "")
                     next_content = next_msg.content if hasattr(next_msg, "content") else next_msg.get("content", "")
-                    if next_role == "user":
+                    # Stop at next real user message
+                    if next_role == "user" and isinstance(next_content, str) and _is_real_user_msg(next_content):
                         break
                     # Keep updating: take the last non-empty assistant content
                     if next_role == "assistant" and next_content and isinstance(next_content, str):

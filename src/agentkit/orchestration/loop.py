@@ -8,6 +8,7 @@ from typing import Any
 from agentkit.config.models import OrchestrationConfig
 from agentkit.model.client import ContextWindowExceeded, ModelClient
 from agentkit.model.types import Message, ModelResponse, StreamChunk, ToolCall
+from agentkit.orchestration.reminders import ReminderEngine
 from agentkit.tools.manager import ToolManager
 from agentkit.tracing.collector import SessionTracer
 
@@ -42,6 +43,7 @@ class AgentLoop:
         self._on_tool_end = on_tool_end
         self._tracer = tracer
         self._memory_manager = memory_manager
+        self._reminders = ReminderEngine()
 
     async def run(self, messages: list[Message]) -> tuple[str, list[Message]]:
         """Run the agent loop on a list of messages.
@@ -173,8 +175,10 @@ class AgentLoop:
                 _audit("agent.loop", "turn.end", duration_ms=(_time.monotonic() - _turn_ts) * 1000)
                 return response.content, new_messages
 
-            # Execute each tool call
-            for tc in response.tool_calls:
+            # Execute tool calls in parallel (independent tools benefit from concurrency)
+            import asyncio as _asyncio
+
+            async def _exec_one(tc: ToolCall):
                 if self._on_tool_start:
                     self._on_tool_start(tc.name, tc.arguments)
 
@@ -191,7 +195,6 @@ class AgentLoop:
                 _tool_ts = _time.monotonic()
                 _audit("agent.loop", "tool.call", data={"name": tc.name})
                 try:
-                    # Expose current tool span so spawn_agent can attach subagent spans
                     from agentkit.tools.builtin import _runtime_context as _rtc
                     if tool_span:
                         _rtc["current_tool_span"] = tool_span
@@ -213,8 +216,31 @@ class AgentLoop:
 
                 if self._on_tool_end:
                     self._on_tool_end(tc.name, result)
+                return tc, result
 
-                # Add tool result message
+            # Run all tool calls concurrently
+            tool_results = await _asyncio.gather(
+                *[_exec_one(tc) for tc in response.tool_calls]
+            )
+
+            # Add tool result messages in original order (with system reminders)
+            _reminder_ctx = {}
+            if self._memory_manager:
+                _remaining = (
+                    self._memory_manager._config.short_term_max_tokens
+                    - self._memory_manager.short_term.context_tokens
+                )
+                _reminder_ctx["remaining_tokens"] = _remaining
+
+            _MAX_TOOL_RESULT_CHARS = 30000  # Hard cap to prevent context blowup
+
+            for tc, result in tool_results:
+                # Hard truncation for overly long results
+                if len(result) > _MAX_TOOL_RESULT_CHARS:
+                    result = result[:_MAX_TOOL_RESULT_CHARS] + \
+                        f"\n\n[TRUNCATED: result was {len(result)} chars, showing first {_MAX_TOOL_RESULT_CHARS}. Use offset/limit params to read specific sections.]"
+                # Post-process: append conditional system reminders
+                result = self._reminders.process(tc.name, result, context=_reminder_ctx)
                 tool_msg = Message(
                     role="tool",
                     content=result,

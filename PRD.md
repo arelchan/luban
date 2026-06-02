@@ -18,7 +18,7 @@ Luban 是一个面向开发者的本地 CLI Agent 框架，目标是：
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  CLI 层 (Rich + prompt_toolkit + / 补全)         │ ← 用户交互
+│  CLI 层 (REPL + 多模态预处理 + Rich 渲染)        │ ← 用户交互
 ├─────────────────────────────────────────────────┤
 │  Skills 层 (目录包 Prompt Templates)               │ ← 预定义技能
 ├─────────────────────────────────────────────────┤
@@ -92,7 +92,7 @@ Luban 是一个面向开发者的本地 CLI Agent 框架，目标是：
 
 **双通道工具系统**：
 
-1. **原生工具**（23 个内置）：
+1. **原生工具**（30 个内置）：
 
    | 功能域 | 工具 |
    |--------|------|
@@ -103,15 +103,22 @@ Luban 是一个面向开发者的本地 CLI Agent 框架，目标是：
    | 任务管理 | `task_create`, `task_update`, `task_get`, `task_list` |
    | 记忆 | `memory_get_profile`, `memory_keyword`, `memory_search` |
    | 子代理 | `spawn_agent`, `resume_agent` |
+   | 用户交互 | `ask_user` |
+   | 规划 | `enter_plan_mode`, `exit_plan_mode` |
+   | 定时任务 | `cron_create`, `cron_list`, `cron_delete` |
    | 会话与自省 | `rename_session`, `introspect_info`, `introspect_source` |
    | 工具 | `get_current_time`, `calculate` |
 
    - 工具描述支持 i18n（用户界面 `/tools` 显示中文描述，LLM Schema 保持英文）
+   - `read_file` 默认 2000 行上限，支持 `offset`/`limit` 分页，支持 PDF 分页读取和图片 base64 读取
    - `edit_file` 支持 `replace_all=True`，批量替换所有匹配字符串
    - `grep_files` 支持 `context` 参数（前后 N 行上下文）和 `max_results` 参数（默认 100）
    - `run_command` 默认 timeout 120s，支持 `background=True` 后台异步执行
    - 任务管理四件套：模型可在复杂多步骤任务中自主拆解和追踪进度
-   - 子 Agent 派发：工具式调用，完全隔离上下文，支持工具白名单和并行派发
+   - 子 Agent 派发：工具式调用，完全隔离上下文，支持工具白名单、并行派发和后台执行（`run_in_background`）
+   - `ask_user`：模型可向用户呈现结构化选项（单选/多选），获取精确反馈
+   - Plan Mode：`enter_plan_mode` 进入只读探索模式，`exit_plan_mode` 输出计划让用户审批后再执行
+   - 工具结果硬截断：orchestration loop 对超过 30k 字符的结果自动截断，防止上下文溢出
 
 2. **MCP 工具**：连接外部 MCP Server，自动发现工具列表，命名空间隔离（`servername__toolname`）
 
@@ -129,7 +136,10 @@ Luban 是一个面向开发者的本地 CLI Agent 框架，目标是：
 
 **ToolManager**（`manager.py`）：统一管理原生和 MCP 两类工具，对编排层暴露统一接口：
 - `get_tool_schemas()` → OpenAI function calling 格式
-- `execute_tool(name, arguments)` → 执行并返回结果
+- `execute_tool(name, arguments)` → 权限检查 → 执行并返回结果
+- **权限系统**：三级控制（`auto_allow` / `require_confirm` / `deny`），通过 `ToolPermissionsConfig` 配置
+- `set_confirm_callback(fn)` → 注入 async 确认回调（TUI 向用户展示确认对话框）
+- 被拒绝的工具返回 `[权限拒绝]` / `[用户拒绝]` 提示给模型，模型可据此调整策略
 
 ### 3.3 记忆层
 
@@ -222,11 +232,12 @@ dimensions = 1536
 | 段落 | 来源 | 用途 |
 |------|------|------|
 | 人格 | `soul.md` | Agent 身份和风格定义 |
-| 指令 | `agents.md` | 高层行为规则（先读后改、并行调用、危险确认等） |
+| 指令 | `agents.md` | 高层行为规则（先读后改、并行调用、危险确认、Git 安全协议等） |
 | 工具指南 | 动态生成 | 按场景分组的工具目录 + 使用优先级提示 |
 | Skills 目录 | 动态生成 | trigger + description（渐进式披露） |
 | 用户画像 | 长期记忆 profile | 个性化背景信息 |
 | 跨会话记忆 | `memory.md` | 历史经验/事实 |
+| 环境信息 | 动态生成 | 日期、工作目录、平台、Shell、OS、模型名、知识截止日期 |
 
 **agents.md 设计哲学**：只保留高层策略规则，具体工具使用规范下沉到每个工具的 docstring 中，避免重复维护。
 
@@ -249,9 +260,10 @@ dimensions = 1536
 **核心文件**：`loader.py`、`injector.py`、`watcher.py`
 
 **ContextInjector**（`injector.py`）：
-- `build_system_messages(context, tools, skills, profile_text)` — 拼接所有段落为单个 system message
+- `build_system_messages(context, tools, skills, profile_text, model_name)` — 拼接所有段落为单个 system message
 - `_build_tool_guide(tools)` — 按 9 个场景组生成工具指南，uncovered 工具归入"其他"
 - `_build_skills_guide(skills)` — 按 source 分组（内置/用户）展示 trigger + description
+- `_build_environment(model_name)` — 动态生成运行时环境信息（日期、平台、CWD、模型名）
 
 **ContextWatcher**（`watcher.py`）：
 - watchdog Observer 监控 soul.md / agents.md / memory.md
@@ -263,6 +275,7 @@ dimensions = 1536
 - 状态存于 `_runtime_context["subagent_states"]`（会话级，退出清空）
 - `resume_agent` 通过 agent_id 取回 messages 继续执行
 - 到达 `max_iterations` 返回 `[AGENT_LIMIT]` 结构化通知
+- **后台执行**：`run_in_background=True` 时立即返回 agent_id，通过 `asyncio.create_task` 后台运行，完成后 `emit_system_event` 通知主对话
 - Tracing：`turn → subagent span → [turn, llm, tool...]` 三层结构
 
 ### 3.5 编排层
@@ -294,8 +307,18 @@ dimensions = 1536
 - `run(messages)` → `(final_text, new_messages)` — 主循环入口
 - 捕获 `ContextWindowExceeded` → 调用 `MemoryManager.compress()` → 重建 messages 重试
 - 回调机制：`on_stream_delta`、`on_tool_start`、`on_tool_end`
+- **工具并行执行**：一轮中多个 tool_calls 通过 `asyncio.gather` 并发执行
+- **Tool Result 后处理**：`ReminderEngine`（`reminders.py`）在工具结果返回模型前按条件追加框架提示（上下文余量警告、任务工具提醒、文件安全检查）
 - Tracing 埋点：自动记录 turn/llm/tool span
 - `max_iterations` 到达时追加 `[SYSTEM]` 事件消息通知模型
+
+**SubAgentExecutor**（`sub_agent.py`）：
+- 支持 `agent_type` 预定义模板：`explore`（只读探索）、`code`（全量工具）、`research`（Web 信息检索）
+- 工具白名单过滤 + 自定义 system prompt
+
+**ReminderEngine**（`reminders.py`）：
+- 条件触发：上下文余量 < 10k、长时间未用 task 工具、文件内容含可疑 prompt injection
+- 以 `[SYSTEM_HINT]` 前缀追加到 tool result 末尾，模型可见并遵循
 
 ### 3.6 可观测层
 
@@ -565,9 +588,20 @@ audit_retention_days = 30
 
 #### 产品设计
 
-**REPL 交互**：
-- 流式 Markdown 渲染、工具调用过程可视化
+**TUI 交互**（prompt_toolkit 全屏模式）：
+- 固定底部输入区 + 可滚动对话区 + 条件排队区 + 状态栏
+- 流式文本渲染、工具调用过程可视化
 - `/` 自动弹出命令列表，支持实时过滤
+- 请求排队：Agent 处理中用户可继续输入，新消息显示在排队区，处理时移入对话区
+- **Ctrl+C 中断**：Agent 处理中按 Ctrl+C 取消当前生成（不退出程序），保留已输出内容
+- 鼠标滚轮 + PageUp/PageDown 滚动历史对话
+
+**多模态输入预处理**：
+- 用户输入中自动检测图片/视频/音频路径和 URL（无需特殊语法）
+- 支持格式：图片（`.png/.jpg/.jpeg/.gif/.webp/.bmp`）、视频（`.mp4/.mov/.avi/.mkv/.webm`）、音频（`.mp3/.wav/.m4a/.flac/.ogg`）
+- 本地文件 base64 编码，URL 保留让模型 API 直接拉取
+- 图片超 20MB 自动 Pillow 缩放（需安装 `pip install agentkit[media]`）
+- 文件不存在返回友好提示而非崩溃
 
 **首次运行向导**：
 - 语言选择（中文 / English）
@@ -585,12 +619,19 @@ audit_retention_days = 30
 
 #### 实现方案
 
-**核心文件**：`app.py`、`renderer.py`、`wizard.py`、`i18n.py`
+**核心文件**：`app.py`、`tui.py`、`tui_renderer.py`、`renderer.py`、`wizard.py`、`i18n.py`、`media/`
 
-- `app.py` — REPL 主循环、组件初始化顺序、命令分发
-- `renderer.py` — Rich 流式 Markdown 渲染 + 工具调用 panel
+- `app.py` — REPL 主循环（TUI background task + get_input queue）、组件初始化顺序、命令分发、Ctrl+C 中断处理
+- `tui.py` — `LubanTUI` 全屏 Application（HSplit 布局：chat_window + queue_window + status_window + input_row）
+- `tui_renderer.py` — `TUIRenderer` 适配器，将 stream/tool/info 输出路由到 TUI buffer
+- `renderer.py` — Rich 流式 Markdown 渲染 + 工具调用 panel（会话选择阶段使用）
 - `wizard.py` — 首次运行配置向导（必填/可选分离，完成后创建 workspace 目录结构）
 - `i18n.py` — 双语字符串表 + 工具中文描述（`TOOL_DESCRIPTIONS`）
+- `media/detector.py` — 正则检测输入中的媒体引用，返回 `(clean_text, list[MediaRef])`
+- `media/image.py` — 图片加载 + 超限自动缩放（Pillow，迭代 75% 直到 ≤20MB）
+- `media/video.py` — 视频加载（base64）
+- `media/audio.py` — 音频加载（base64）
+- `media/processor.py` — 编排入口，按类型分发到对应 loader，返回 `list[ContentPart]`
 
 **事件注入**（`events.py`）：`emit_system_event(msg)` — 以 `[SYSTEM timestamp]` 前缀作为 user message 注入对话历史
 
@@ -608,8 +649,9 @@ AgentKitConfig
 ├── ModelConfig (default, providers[], options, base_url*, api_keys*)
 │   ├── ProviderConfig (name, base_url, api_key, format, models[])
 │   └── ModelOptions (temperature, max_tokens, thinking, thinking_budget, context_window)
-├── ToolsConfig (enable_native, mcp_servers, web_search)
-│   └── WebSearchConfig (engine, brave_api_key)
+├── ToolsConfig (enable_native, mcp_servers, web_search, permissions)
+│   ├── WebSearchConfig (engine, brave_api_key)
+│   └── ToolPermissionsConfig (auto_allow[], require_confirm[], deny[])
 ├── MemoryConfig (short_term_max_messages, short_term_max_tokens, long_term, embedding)
 │   ├── LongTermMemoryConfig (enabled, storage_file, memories_file, extraction_model, trigger, trigger_value)
 │   └── EmbeddingConfig (enabled, provider, model, base_url, api_key, dimensions)
@@ -700,7 +742,8 @@ dependencies = [
 | Phase 10: 插件系统 | Done | 目录扫描加载 + on_span_end/on_session_end hooks + friday-tracing 示例 |
 | Phase 11: 数据管理 | Done | Trace/Session/Audit 留存策略 + 启动时后台清理 |
 | Phase 12: 代码架构重构 | Done | tools/builtin/ 包拆分，skills 目录化，统一 workspace 结构，删除死代码 |
-| Phase 13: 打磨 | In Progress | 补充单元测试，MCP 优雅降级 |
+| Phase 13: 多模态输入 | Done | 图片/视频/音频检测 + 处理，ContentPart 类型扩展，双 API 格式适配 |
+| Phase 14: 打磨 | In Progress | 补充单元测试，MCP 优雅降级 |
 
 ---
 
@@ -709,3 +752,5 @@ dependencies = [
 - [ ] 补充单元测试覆盖（插件层、记忆层）
 - [ ] MCP Server 连接失败时的优雅降级
 - [ ] 长期记忆：历史条目补充向量（首次配置 Embedding 后的迁移）
+- [ ] 大图自动缩放（需 Pillow optional dependency）
+- [ ] 多模态记忆压缩时，image/audio ContentPart 降级为文字描述

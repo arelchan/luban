@@ -8,12 +8,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.shortcuts import CompleteStyle
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style
 from rich.console import Console
 
 from agentkit import APP_NAME
@@ -37,6 +32,8 @@ from agentkit.tracing.collector import SessionTracer
 
 # Import builtin tools so they register themselves
 import agentkit.tools.builtin  # noqa: F401
+
+
 
 
 async def _interactive_model_select(
@@ -166,9 +163,6 @@ async def main() -> None:
     lang = config.cli.language
     renderer = Renderer(console, lang=lang)
 
-    # Show startup banner
-    renderer.show_banner()
-
     # Initialize model client
     model_client = ModelClient(config.model)
 
@@ -195,7 +189,6 @@ async def main() -> None:
 
     # ─── Session selection ───
     session_store = SessionStore()
-    prompt_session: PromptSession[str] = PromptSession()
     current_session = None
 
     while current_session is None:
@@ -205,7 +198,12 @@ async def main() -> None:
             break
 
         renderer.show_sessions(sessions[:5], lang)
-        choice = (await prompt_session.prompt_async(t("session_prompt", lang))).strip()
+        try:
+            choice = (await asyncio.to_thread(input, t("session_prompt", lang))).strip()
+        except (EOFError, KeyboardInterrupt):
+            # Ctrl+C / Ctrl+D during session selection → exit cleanly
+            renderer.show_info(t("goodbye", lang))
+            return
 
         # Delete: d<n>
         if choice.lower().startswith("d") and choice[1:].isdigit():
@@ -215,7 +213,6 @@ async def main() -> None:
                 target = visible[n - 1]
                 session_store.delete_session(target.id)
                 renderer.show_success(t("session_deleted", lang, title=target.title or target.id))
-                # Loop back to show refreshed list
             else:
                 renderer.show_warning(t("session_delete_invalid", lang, n=str(n)))
             continue
@@ -278,7 +275,7 @@ async def main() -> None:
     tools_list = tool_manager.list_tools(lang="en")  # tool guide always in English (matches docstrings)
     _memory_store = memory_manager.long_term.store if memory_manager.long_term else None
     _profile_text = _memory_store.to_context_string("profile") if _memory_store else None
-    context_injector.inject(context, memory_manager.short_term, tools=tools_list, skills=_skills, profile_text=_profile_text)
+    context_injector.inject(context, memory_manager.short_term, tools=tools_list, skills=_skills, profile_text=_profile_text, model_name=config.model.default)
 
     # Start context file watcher (re-injects with tool list + skills on file changes)
     context_watcher: ContextWatcher | None = None
@@ -291,6 +288,7 @@ async def main() -> None:
             skills=_skills,
             on_reload=lambda path: renderer.show_info(f"Context reloaded: {Path(path).name}"),
             memory_store=_memory_store,
+            model_name=config.model.default,
         )
         await context_watcher.start()
 
@@ -312,21 +310,6 @@ async def main() -> None:
         session_str = "New session" if lang == "en" else "新会话"
 
     plugins_str = ", ".join(plugin_manager.loaded_plugins) if plugin_manager.has_plugins else ""
-    renderer.show_startup_panel(
-        model=config.model.default,
-        params=params_str,
-        tools=tool_names_str,
-        session_info=session_str,
-        plugins=plugins_str,
-    )
-
-    # Show session history if resuming
-    if hasattr(current_session, 'turn_count') and current_session.turn_count > 0:
-        loaded_msgs = memory_manager.short_term.full_log
-        if loaded_msgs:
-            renderer.show_session_history(loaded_msgs, lang)
-
-    renderer.console.print()
 
     audit("app", "startup.complete", data={"session_id": current_session.id},
           duration_ms=(_time.monotonic() - _startup_ts) * 1000)
@@ -339,48 +322,16 @@ async def main() -> None:
         tracer=tracer,
     )
 
-    # Inject full runtime context for session + introspection + sub-agent tools
-    from agentkit.tools.builtin import set_runtime_context
-    set_runtime_context(
-        session_store=session_store,
-        current_session_getter=lambda: current_session,
-        current_session_setter=lambda title: setattr(current_session, "title", title),
-        tool_manager=tool_manager,
-        skill_executor=skill_executor,
-        config=config,
-        memory_manager=memory_manager,
-        model_client=model_client,
-        lang_getter=lambda: lang,
-        subagent_executor=subagent_executor,
-        renderer=renderer,
-        embedder=embedder,
-    )
-
-    # Emit plugin load event (now that memory_manager is available via runtime context)
-    if plugin_manager.loaded_plugins:
-        from agentkit.events import emit_system_event
-        emit_system_event(f"已加载插件：{', '.join(plugin_manager.loaded_plugins)}")
+    # Initialize cron scheduler
+    from agentkit.cron import Scheduler, JobStore
+    cron_store = JobStore()
+    cron_store.load_durable()
+    cron_scheduler = Scheduler(cron_store)
 
     # Create dashboard (lazy start on /log)
     dashboard = DashboardServer(tracer)
 
-    # Create agent loop
-    agent_loop = AgentLoop(
-        model_client=model_client,
-        tool_manager=tool_manager,
-        config=config.orchestration,
-        on_stream_delta=renderer.stream_delta,
-        on_tool_start=renderer.show_tool_call,
-        on_tool_end=renderer.show_tool_result,
-        tracer=tracer,
-        memory_manager=memory_manager,
-    )
-
-    # Setup input session with history + slash command completion
-    history_path = Path(config.cli.history_file).expanduser()
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Build slash command list: (trigger, description)
+    # ─── Build slash command completer ───
     _builtin_cmd_descs = [
         ("/help",        "显示帮助" if lang == "zh" else "Show help"),
         ("/tools",       "查看已加载工具" if lang == "zh" else "List tools"),
@@ -397,14 +348,12 @@ async def main() -> None:
         ("/log",         "打开 Tracing 仪表盘" if lang == "zh" else "Open tracing dashboard"),
         ("/lang zh",     "切换为中文" if lang == "zh" else "Switch to Chinese"),
         ("/lang en",     "Switch to English"),
+        ("/cron",        "定时任务管理" if lang == "zh" else "Cron jobs"),
         ("/clear",       "清除对话历史" if lang == "zh" else "Clear conversation"),
         ("/restart",     f"重启 {APP_NAME}" if lang == "zh" else f"Restart {APP_NAME}"),
         ("/exit",        f"退出 {APP_NAME}" if lang == "zh" else f"Exit {APP_NAME}"),
     ]
-    _skill_cmd_descs = [
-        (sk.trigger, sk.description)
-        for sk in skill_executor.list_skills()
-    ]
+    _skill_cmd_descs = [(sk.trigger, sk.description) for sk in skill_executor.list_skills()]
     _all_cmd_descs = _builtin_cmd_descs + _skill_cmd_descs
 
     class _SlashCompleter(Completer):
@@ -412,78 +361,74 @@ async def main() -> None:
             text = document.text_before_cursor
             if not text.startswith("/"):
                 return
-            word = text  # already starts with /
+            word = text
             for cmd, desc in _all_cmd_descs:
                 if cmd.startswith(word):
                     yield Completion(
                         cmd,
                         start_position=-len(word),
-                        display=HTML(f"{cmd}"),
-                        display_meta=HTML(f"<ansigray>{desc}</ansigray>"),
+                        display=cmd,
+                        display_meta=desc,
                     )
 
-    _completion_style = Style.from_dict({
-        "completion-menu": "bg:#1e1e2e",
-        "completion-menu.completion": "fg:#c0caf5",
-        "completion-menu.completion.current": "bg:#3d59a1 fg:#ffffff bold",
-        "completion-menu.meta": "fg:#565f89",
-        "completion-menu.meta.current": "fg:#a9b1d6",
-        "scrollbar.background": "bg:#1e1e2e",
-        "scrollbar.button": "bg:#3d59a1",
-    })
+    _slash_completer = _SlashCompleter()
 
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path)),
-        completer=_SlashCompleter(),
-        complete_while_typing=True,
-        complete_style=CompleteStyle.COLUMN,
-        style=_completion_style,
+    # ─── Setup TUI ───
+    from agentkit.cli.tui import LubanTUI
+    from agentkit.cli.tui_renderer import TUIRenderer
+
+    tui = LubanTUI(completer=_slash_completer)
+    renderer = TUIRenderer(tui, lang=lang)  # Override Rich renderer with TUI renderer
+
+    # Wire permission confirmation through TUI
+    async def _tool_confirm(tool_name: str, arguments: dict) -> bool:
+        """Ask user to confirm a tool execution via TUI."""
+        import json
+        args_preview = json.dumps(arguments, ensure_ascii=False)
+        if len(args_preview) > 200:
+            args_preview = args_preview[:200] + "..."
+        msg = f"执行 `{tool_name}`？\n  参数: {args_preview}" if lang == "zh" else f"Execute `{tool_name}`?\n  Args: {args_preview}"
+        return await tui.confirm(msg)
+
+    tool_manager.set_confirm_callback(_tool_confirm)
+
+    # Inject full runtime context for session + introspection + sub-agent tools
+    from agentkit.tools.builtin import set_runtime_context
+    set_runtime_context(
+        session_store=session_store,
+        current_session_getter=lambda: current_session,
+        current_session_setter=lambda title: setattr(current_session, "title", title),
+        tool_manager=tool_manager,
+        skill_executor=skill_executor,
+        config=config,
+        memory_manager=memory_manager,
+        model_client=model_client,
+        lang_getter=lambda: lang,
+        subagent_executor=subagent_executor,
+        renderer=renderer,
+        tui=tui,
+        embedder=embedder,
+        scheduler=cron_scheduler,
+    )
+
+    # Emit plugin load event (now that memory_manager is available via runtime context)
+    if plugin_manager.loaded_plugins:
+        from agentkit.events import emit_system_event
+        emit_system_event(f"已加载插件：{', '.join(plugin_manager.loaded_plugins)}")
+
+    # Create agent loop
+    agent_loop = AgentLoop(
+        model_client=model_client,
+        tool_manager=tool_manager,
+        config=config.orchestration,
+        on_stream_delta=renderer.stream_delta,
+        on_tool_start=renderer.show_tool_call,
+        on_tool_end=renderer.show_tool_result,
+        tracer=tracer,
+        memory_manager=memory_manager,
     )
 
     # REPL loop
-    def _build_prompt() -> str:
-        """Build prompt: a visual input box with context usage indicator."""
-        used = memory_manager.short_term.context_tokens
-        ctx = config.model.options.context_window
-        ctx_k = ctx // 1000
-        ratio = used / ctx if ctx > 0 else 0
-
-        # Build usage label
-        if used >= 1000:
-            usage_str = f"{used // 1000}k/{ctx_k}k"
-        elif used > 0:
-            usage_str = f"{used}/{ctx_k}k"
-        else:
-            usage_str = f"0/{ctx_k}k"
-
-        # Terminal width for the top border
-        try:
-            width = renderer.console.width - 2
-        except Exception:
-            width = 78
-        if width < 20:
-            width = 78
-
-        # Color based on usage ratio (for top border only, printed via stdout)
-        if ratio >= 0.9:
-            color = "\033[31m"  # red
-        elif ratio >= 0.8:
-            color = "\033[33m"  # yellow
-        else:
-            color = "\033[2m"   # dim
-
-        reset = "\033[0m"
-        # Top border: ╭── usage ─────────╮
-        label = f" {usage_str} "
-        remaining_width = width - len(label) - 4  # -4 for ╭──╮
-        left_bar = "─" * 2
-        right_bar = "─" * max(remaining_width, 1)
-        top_line = f"{color}╭{left_bar}{label}{right_bar}╮{reset}"
-        # Print top border via stdout (ANSI works here)
-        sys.stdout.write(f"{top_line}\n")
-        sys.stdout.flush()
-        # Return plain text prompt (no ANSI — prompt_toolkit doesn't interpret it)
-        return "╰─▶ "
 
     async def _extract_memory_silent() -> None:
         """Extract long-term memory silently (no spinner). Used before clear/session new."""
@@ -529,15 +474,59 @@ async def main() -> None:
                 hint = "/compress 或 /session new" if lang == "zh" else "/compress or /session new"
                 renderer.show_warning(f"上下文已达 {pct}%，建议 {hint}" if lang == "zh" else f"Context at {pct}%, consider {hint}")
 
-    while True:
-        try:
-            user_input = await session.prompt_async(_build_prompt())
-        except (EOFError, KeyboardInterrupt):
-            break
+    async def _cron_poll_loop():
+        """Background task that checks and executes due cron jobs."""
+        while True:
+            await asyncio.sleep(30)
+            due_jobs = cron_scheduler.check_due()
+            for job in due_jobs:
+                await _execute_cron_job(
+                    job, cron_scheduler, model_client, tool_manager,
+                    config, context, agent_loop, renderer, lang, embedder,
+                )
 
-        text = user_input.strip()
-        if not text:
-            continue
+    _cron_task = asyncio.create_task(_cron_poll_loop())
+
+    # Show startup info
+    renderer.show_banner()
+    renderer.show_startup_panel(
+        model=config.model.default,
+        params=params_str,
+        tools=tool_names_str,
+        session_info=session_str,
+        plugins=plugins_str,
+    )
+
+    # Show session history if resuming
+    if hasattr(current_session, 'turn_count') and current_session.turn_count > 0:
+        loaded_msgs = memory_manager.short_term.full_log
+        if loaded_msgs:
+            renderer.show_session_history(loaded_msgs, lang)
+
+    # Update TUI status line with context usage
+    def _update_status():
+        used = memory_manager.short_term.context_tokens
+        ctx = config.model.options.context_window
+        used_k = f"{used // 1000}k" if used >= 1000 else str(used)
+        ctx_k = f"{ctx // 1000}k" if ctx >= 1000 else str(ctx)
+        tui.set_status(f"{config.model.default} | {used_k}/{ctx_k}")
+
+    tui.enable_auto_scroll()
+
+    # Start TUI input loop in background — it collects input via PromptSession
+    # while the REPL loop below processes messages from the queue
+    _tui_task = asyncio.create_task(tui.run())
+
+    while True:
+        _update_status()
+        tui.set_busy(False)
+        text = await tui.get_input()
+        if not text or text == "/exit":
+            _cron_task.cancel()
+            break
+        tui.set_busy(True)
+        # If this message was queued (sent during processing), move to chat
+        tui.dequeue_message()
 
         # Handle slash commands
         _cmd_handled = False
@@ -573,28 +562,18 @@ async def main() -> None:
                 _cmd_handled = True
             elif cmd == "/models":
                 current = config.model.default
-                # Collect all available models
                 all_models: list[str] = []
                 if config.model.providers:
                     for p in config.model.providers:
                         all_models.extend(p.models)
                 elif config.model.available:
                     all_models = list(config.model.available)
-
                 if all_models:
-                    selected = await _interactive_model_select(
-                        renderer, all_models, current, lang
-                    )
-                    if selected and selected != current:
-                        config.model.default = selected
-                        renderer.show_success(t("model_switched", lang, model=selected))
-                        from agentkit.events import emit_system_event
-                        emit_system_event(f"模型已切换：{current} → {selected}")
-                    elif selected == current:
-                        renderer.show_info(
-                            f"保持当前模型：{current}" if lang == "zh"
-                            else f"Keeping current model: {current}"
-                        )
+                    for i, m in enumerate(all_models, 1):
+                        mark = " ◀" if m == current else ""
+                        renderer.show_info(f"  {i}) {m}{mark}")
+                    hint = "用 /model <名称> 切换" if lang == "zh" else "Use /model <name> to switch"
+                    renderer.show_info(hint)
                 else:
                     renderer.show_info(f"当前模型：{current}" if lang == "zh" else f"Current model: {current}")
                     hint = "在 config.toml 配置 [[model.providers]] 来管理多供应商模型" if lang == "zh" else "Configure [[model.providers]] in config.toml to manage multi-provider models"
@@ -604,7 +583,6 @@ async def main() -> None:
                 parts = text.split(maxsplit=1)
                 if len(parts) > 1:
                     new_model = parts[1].strip()
-                    # Validate model exists in some provider
                     found = False
                     if config.model.providers:
                         for p in config.model.providers:
@@ -612,7 +590,7 @@ async def main() -> None:
                                 found = True
                                 break
                     else:
-                        found = True  # Legacy mode: no validation
+                        found = True
                     if found:
                         old_model = config.model.default
                         config.model.default = new_model
@@ -647,7 +625,6 @@ async def main() -> None:
                     renderer.show_info(t("lang_current", lang))
                 _cmd_handled = True
             elif cmd == "/compress":
-                # Force context compression regardless of budget
                 log = memory_manager.short_term.full_log
                 if len(log) <= 2:
                     renderer.show_info(t("context_no_need", lang))
@@ -680,9 +657,7 @@ async def main() -> None:
             elif cmd == "/session":
                 parts = text.split(maxsplit=1)
                 if len(parts) > 1 and parts[1].strip() == "new":
-                    # Extract long-term memory before switching session
                     await _extract_memory_silent()
-                    # Save current, start new
                     from datetime import datetime, timezone as tz
                     session_store.save_messages(current_session.id, memory_manager.short_term.full_log)
                     session_store.update_meta(
@@ -710,15 +685,16 @@ async def main() -> None:
                 _cmd_handled = True
             elif cmd == "/restart":
                 renderer.show_info(t("restarting", lang))
-                # Cleanup
                 await memory_manager.on_session_end()
                 if context_watcher:
                     await context_watcher.stop()
                 await tool_manager.shutdown()
                 dashboard.stop()
                 await model_client.shutdown()
-                # Re-exec process
                 os.execv(sys.executable, [sys.executable, "-m", "agentkit.cli.app"])
+            elif cmd == "/cron":
+                await _handle_cron_command(text, cron_scheduler, renderer, lang)
+                _cmd_handled = True
             elif cmd == "/skills":
                 skills_list = skill_executor.list_skills()
                 if skills_list:
@@ -743,7 +719,6 @@ async def main() -> None:
                         renderer.end_stream()
                         memory_manager.add_messages(new_messages)
                         await memory_manager.on_turn_complete()
-                        # Auto-save
                         from datetime import datetime, timezone as tz
                         session_store.save_messages(current_session.id, memory_manager.short_term.full_log)
                         session_store.update_meta(
@@ -762,14 +737,43 @@ async def main() -> None:
         # Add user message to memory (with timestamp for model temporal awareness)
         from datetime import datetime as _dt
         _ts = _dt.now().strftime("%Y-%m-%d %H:%M")
-        memory_manager.add_message(Message(role="user", content=f"[{_ts}] {text}"))
 
-        # Run agent loop with current messages
+        # Detect media references (images, videos, audio) in user input
+        from agentkit.media import detect_media, process_media_refs
+        _clean_text, _media_refs = detect_media(text)
+        if _media_refs:
+            _content_parts = await process_media_refs(_media_refs, _clean_text)
+            memory_manager.add_message(Message(role="user", content=_content_parts))
+        else:
+            memory_manager.add_message(Message(role="user", content=f"[{_ts}] {text}"))
+
+        # Run agent loop with current messages (supports Ctrl+C cancellation)
         try:
             renderer.start_stream()
             messages_for_llm = memory_manager.get_messages_for_llm()
-            response_text, new_messages = await agent_loop.run(messages_for_llm)
+
+            # Run in a task so we can cancel on Ctrl+C interrupt
+            _agent_task = asyncio.create_task(agent_loop.run(messages_for_llm))
+
+            # Wait for either completion or interrupt
+            while not _agent_task.done():
+                if tui.interrupted:
+                    _agent_task.cancel()
+                    try:
+                        await _agent_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    break
+                await asyncio.sleep(0.05)
+
             renderer.end_stream()
+
+            if tui.interrupted:
+                tui.clear_interrupt()
+                # Still save partial messages if any were generated
+                continue
+
+            response_text, new_messages = _agent_task.result()
 
             # Add generated messages (assistant + tool results) to memory
             memory_manager.add_messages(new_messages)
@@ -804,9 +808,19 @@ async def main() -> None:
             )
             _check_context_warning()
 
+        except asyncio.CancelledError:
+            renderer.end_stream()
         except Exception as e:
             renderer.end_stream()
             renderer.show_error(f"{type(e).__name__}: {e}")
+
+    _cron_task.cancel()
+    tui.exit()
+    _tui_task.cancel()
+    try:
+        await _tui_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
     # Session end
     await memory_manager.on_session_end()
@@ -818,14 +832,205 @@ async def main() -> None:
     plugin_manager.dispatch_session_end(current_session.id)
     audit("app", "shutdown", data={"session_id": current_session.id,
                                     "turns": memory_manager.short_term.turn_count})
-    renderer.show_info(t("goodbye", lang))
+
+
+async def _handle_cron_command(text: str, scheduler, renderer, lang: str) -> None:
+    """Handle /cron subcommands."""
+    from datetime import datetime
+    from agentkit.cron.job import CronJob
+    from agentkit.cron.scheduler import describe_cron, next_fire_time
+
+    parts = text.split(maxsplit=1)
+    args = parts[1].strip() if len(parts) > 1 else ""
+
+    if not args or args == "list":
+        # /cron list
+        jobs = scheduler.store.jobs
+        if not jobs:
+            renderer.show_info("当前没有活跃的定时任务。" if lang == "zh" else "No active cron jobs.")
+            return
+        renderer.show_info("ID       频率              过期时间      Prompt")
+        for job in jobs:
+            desc = describe_cron(job.cron, job.ttl)
+            expire_str = datetime.fromtimestamp(job.expires_at).strftime("%m-%d %H:%M") if job.expires_at else "永久"
+            durable_mark = " 💾" if job.durable else ""
+            renderer.show_info(f"  {job.id}   {desc:<16} {expire_str:<12} {job.prompt[:30]}{durable_mark}")
+        return
+
+    if args.startswith("del "):
+        # /cron del <id>
+        job_id = args[4:].strip()
+        removed = scheduler.store.remove(job_id)
+        if removed:
+            renderer.show_success(f"✓ 已删除任务 {job_id}")
+        else:
+            renderer.show_error(f"未找到任务 {job_id}")
+        return
+
+    if args.startswith("log "):
+        # /cron log <id>
+        job_id = args[4:].strip()
+        job = scheduler.store.get(job_id)
+        if not job:
+            renderer.show_error(f"未找到任务 {job_id}")
+            return
+        if not job.messages:
+            renderer.show_info(f"任务 {job_id} 尚未执行过。")
+            return
+        # Show last N message pairs
+        for msg in job.messages[-20:]:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, str) and role in ("user", "assistant"):
+                prefix = "→" if role == "user" else "←"
+                renderer.show_info(f"  {prefix} {content[:120]}")
+        return
+
+    # /cron [--save] [once] "<expr>" <ttl> <prompt>
+    durable = False
+    if args.startswith("--save "):
+        durable = True
+        args = args[7:].strip()
+
+    is_once = False
+    if args.startswith("once "):
+        is_once = True
+        args = args[5:].strip()
+
+    # Parse: "cron_expr" ttl prompt  OR  cron_expr ttl prompt
+    # Support both quoted and unquoted cron expressions
+    if args.startswith('"'):
+        # Quoted cron expression
+        end_quote = args.index('"', 1)
+        cron_expr = args[1:end_quote]
+        rest = args[end_quote + 1:].strip()
+    else:
+        # First token is cron (only works for simple patterns without spaces, or once)
+        if is_once:
+            cron_expr = "once"
+            rest = args
+        else:
+            # Try to parse 5 fields
+            tokens = args.split()
+            if len(tokens) < 7:  # 5 cron fields + ttl + at least 1 word prompt
+                renderer.show_error('格式：/cron "*/5 * * * *" 1h 任务描述')
+                return
+            cron_expr = " ".join(tokens[:5])
+            rest = " ".join(tokens[5:])
+
+    # rest = "ttl prompt..."
+    rest_parts = rest.split(maxsplit=1)
+    if len(rest_parts) < 2:
+        renderer.show_error('格式：/cron "<频率>" <生命周期> <任务描述>')
+        return
+    ttl = rest_parts[0]
+    prompt = rest_parts[1]
+
+    if is_once:
+        cron_expr = "once"
+
+    try:
+        job = CronJob.new(cron=cron_expr, ttl=ttl, prompt=prompt, durable=durable)
+        scheduler.store.add(job)
+    except ValueError as e:
+        renderer.show_error(str(e))
+        return
+
+    desc = describe_cron(job.cron, job.ttl)
+    nxt = next_fire_time(job)
+    next_str = datetime.fromtimestamp(nxt).strftime("%H:%M") if nxt else "—"
+    expire_str = datetime.fromtimestamp(job.expires_at).strftime("%m-%d %H:%M") if job.expires_at else "永久"
+    save_mark = " [已持久化]" if durable else ""
+
+    renderer.show_success(f"✓ [{job.id}] {desc} | {expire_str}过期 | 下次执行：{next_str}{save_mark}")
+
+
+async def _execute_cron_job(
+    job, scheduler, model_client, tool_manager, config, context, agent_loop, renderer, lang, embedder
+) -> None:
+    """Execute a single cron job in its own context."""
+    from datetime import datetime
+    from agentkit.cron.scheduler import describe_cron
+    from agentkit.memory.manager import MemoryManager
+    from agentkit.memory.short_term import ShortTermMemory
+    from agentkit.model.types import Message
+    from agentkit.context.injector import ContextInjector
+    from agentkit.orchestration.loop import AgentLoop
+
+    # Show separator
+    ts = datetime.now().strftime("%H:%M")
+    renderer.show_info(f"\n───── ⏰ {job.id} | {ts} ─────")
+
+    # Build job-specific memory from its history
+    job_memory = MemoryManager(config.memory, model_client)
+    for msg_dict in job.messages:
+        job_memory.add_message(Message(
+            role=msg_dict["role"],
+            content=msg_dict.get("content", ""),
+            tool_calls=[],
+        ))
+
+    # Inject context with cron suffix
+    injector = ContextInjector()
+    tools_list = tool_manager.list_tools(lang="en")
+    injector.inject(context, job_memory.short_term, tools=tools_list)
+
+    # Append cron system suffix to existing system message
+    cron_suffix = scheduler.build_cron_system_suffix(job)
+    sys_msgs = [m for m in job_memory.short_term.full_log if m.role == "system"]
+    if sys_msgs:
+        sys_msg = sys_msgs[0]
+        sys_msg.content = (sys_msg.content or "") + cron_suffix
+
+    # Add current trigger
+    trigger_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    job_memory.add_message(Message(role="user", content=f"[{trigger_ts}] {job.prompt}"))
+
+    # Build a fresh agent loop for this job
+    job_loop = AgentLoop(
+        model_client=model_client,
+        tool_manager=tool_manager,
+        config=config.orchestration,
+        on_stream_delta=renderer.stream_delta,
+        on_tool_start=renderer.show_tool_call,
+        on_tool_end=renderer.show_tool_result,
+        memory_manager=job_memory,
+    )
+
+    try:
+        messages_for_llm = job_memory.get_messages_for_llm()
+        renderer.start_stream()
+        response_text, new_messages = await job_loop.run(messages_for_llm)
+        renderer.end_stream()
+
+        # Save to job history
+        job.messages.append({"role": "user", "content": f"[{trigger_ts}] {job.prompt}"})
+        if response_text:
+            job.messages.append({"role": "assistant", "content": response_text})
+
+        # Trim job history if too long (keep last 40 messages)
+        if len(job.messages) > 40:
+            job.messages = job.messages[-40:]
+
+    except Exception as e:
+        renderer.end_stream()
+        renderer.show_error(f"[Cron {job.id}] {type(e).__name__}: {e}")
+
+    # Mark fired
+    scheduler.mark_fired(job)
+    renderer.show_info("──────────────────────────────\n")
 
 
 def cli_entry() -> None:
     """Synchronous entry point for pyproject.toml scripts."""
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError, SystemExit):
+        pass
+    except asyncio.CancelledError:
+        pass
+    finally:
+        # Ensure clean exit without traceback
         sys.exit(0)
 
 

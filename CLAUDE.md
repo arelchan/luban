@@ -35,6 +35,8 @@ src/agentkit/
 ├── audit.py              # 开发者审计日志（单例）
 ├── cleanup.py            # 数据清理（trace/session/audit 留存）
 ├── config/               # Pydantic 配置模型 + TOML 读写
+├── cron/                 # 定时任务调度（job/store/scheduler）
+├── media/                # 多模态输入预处理（CLI 层子模块）
 ├── model/                # LLM client + Embedder
 ├── tools/
 │   └── builtin/          # 内置工具包（按功能域拆分）
@@ -57,7 +59,7 @@ src/agentkit/
 │   └── builtin/<name>/SKILL.md  # 每个 skill 一个目录包
 ├── tracing/              # OpenTelemetry 风格 span
 ├── dashboard/            # 本地 Web UI
-└── cli/                  # REPL + 渲染 + 向导
+└── cli/                  # REPL + 多模态预处理 + 渲染 + 向导
 ```
 
 ## 工作空间结构

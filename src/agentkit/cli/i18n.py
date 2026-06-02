@@ -203,6 +203,9 @@ TOOL_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "memory_get_profile": "获取用户画像偏好（技术栈/工作习惯/背景等）",
         "memory_keyword": "按关键词精确搜索长期记忆条目",
         "memory_search": "按语义相似度搜索长期记忆（需配置 embedding；否则降级为关键词搜索）",
+        "cron_create": "创建定时任务（频率 + 生命周期 + prompt）",
+        "cron_list": "查看当前所有定时任务",
+        "cron_delete": "删除指定的定时任务",
     },
     "en": {},  # Empty = use original English docstrings
 }

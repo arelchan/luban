@@ -89,12 +89,15 @@ class TestContextInjector:
         assert len(msgs) == 1
         from agentkit import APP_NAME
         assert APP_NAME in msgs[0].content
+        # Environment section always present
+        assert "# Environment" in msgs[0].content
 
     def test_build_system_messages_partial(self):
         injector = ContextInjector()
         msgs = injector.build_system_messages({"soul": "persona", "agents": None, "memory": None})
         assert len(msgs) == 1
-        assert msgs[0].content == "persona"
+        assert "persona" in msgs[0].content
+        assert "# Environment" in msgs[0].content
 
     def test_inject_into_memory(self):
         injector = ContextInjector()
@@ -104,7 +107,7 @@ class TestContextInjector:
         injector.inject({"soul": "You are helpful.", "agents": None, "memory": None}, mem)
         sys_msgs = mem.get_system_messages()
         assert len(sys_msgs) == 1
-        assert sys_msgs[0].content == "You are helpful."
+        assert "You are helpful." in sys_msgs[0].content
 
     def test_inject_replaces_previous(self):
         injector = ContextInjector()
@@ -112,7 +115,7 @@ class TestContextInjector:
         mem = ShortTermMemory(config)
 
         injector.inject({"soul": "v1", "agents": None, "memory": None}, mem)
-        assert mem.get_system_messages()[0].content == "v1"
+        assert "v1" in mem.get_system_messages()[0].content
 
         injector.inject({"soul": "v2", "agents": None, "memory": None}, mem)
-        assert mem.get_system_messages()[0].content == "v2"
+        assert "v2" in mem.get_system_messages()[0].content

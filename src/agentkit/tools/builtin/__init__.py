@@ -43,3 +43,6 @@ from agentkit.tools.builtin.memory import (  # noqa: F401
     memory_search,
 )
 from agentkit.tools.builtin.agents import spawn_agent, resume_agent  # noqa: F401
+from agentkit.tools.builtin.interaction import ask_user  # noqa: F401
+from agentkit.tools.builtin.plan import enter_plan_mode, exit_plan_mode  # noqa: F401
+from agentkit.tools.builtin.cron import cron_create, cron_list, cron_delete  # noqa: F401

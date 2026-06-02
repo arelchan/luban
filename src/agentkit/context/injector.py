@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import platform
+from datetime import date
+
 from agentkit import APP_NAME
 from agentkit.memory.short_term import ShortTermMemory
 from agentkit.model.types import Message
@@ -16,6 +20,7 @@ class ContextInjector:
         tools: list[dict] | None = None,
         skills: list | None = None,
         profile_text: str | None = None,
+        model_name: str | None = None,
     ) -> list[Message]:
         """Build a single system message from all context sources.
 
@@ -26,6 +31,7 @@ class ContextInjector:
         4. skills       → Available skill commands (progressive disclosure: name + trigger only)
         5. profile_text → Long-term memory profile (caller-prepared string, optional)
         6. memory.md    → Cross-session remembered facts
+        7. environment  → Dynamic runtime info (date, platform, cwd, model)
         """
         sections: list[str] = []
 
@@ -52,6 +58,9 @@ class ContextInjector:
         if not sections:
             sections.append(f"You are {APP_NAME}, a helpful CLI assistant.")
 
+        # Dynamic environment section (always appended last)
+        sections.append(self._build_environment(model_name))
+
         combined = "\n\n---\n\n".join(sections)
         return [Message(role="system", content=combined)]
 
@@ -62,10 +71,35 @@ class ContextInjector:
         tools: list[dict] | None = None,
         skills: list | None = None,
         profile_text: str | None = None,
+        model_name: str | None = None,
     ) -> None:
         """Load context and inject as system messages into short-term memory."""
-        system_messages = self.build_system_messages(context, tools=tools, skills=skills, profile_text=profile_text)
+        system_messages = self.build_system_messages(
+            context, tools=tools, skills=skills, profile_text=profile_text, model_name=model_name,
+        )
         memory.set_system_messages(system_messages)
+
+    @staticmethod
+    def _build_environment(model_name: str | None = None) -> str:
+        """Build dynamic environment section with runtime info."""
+        cwd = os.getcwd()
+        shell = os.environ.get("SHELL", "unknown").rsplit("/", 1)[-1]
+        os_version = platform.platform(terse=True)
+        today = date.today().isoformat()
+
+        lines = [
+            "# Environment",
+            "",
+            f"- Date: {today}",
+            f"- Working directory: {cwd}",
+            f"- Platform: {platform.system().lower()}",
+            f"- Shell: {shell}",
+            f"- OS: {os_version}",
+        ]
+        if model_name:
+            lines.append(f"- Model: {model_name}")
+        lines.append(f"- Knowledge cutoff: January 2025")
+        return "\n".join(lines)
 
     @staticmethod
     def _build_tool_guide(tools: list[dict]) -> str:

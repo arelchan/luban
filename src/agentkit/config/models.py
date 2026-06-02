@@ -48,10 +48,33 @@ class WebSearchConfig(BaseModel):
     brave_api_key: str = ""   # https://api.search.brave.com/
 
 
+class ToolPermissionsConfig(BaseModel):
+    """Tool execution permission levels.
+
+    - auto_allow: tools that execute without user confirmation (safe, read-only)
+    - require_confirm: tools that need user approval before execution (writes, shell)
+    - deny: tools that are completely blocked
+
+    Tools not listed in any category default to auto_allow.
+    """
+    auto_allow: list[str] = Field(default_factory=lambda: [
+        "read_file", "glob_files", "grep_files", "list_directory",
+        "get_current_time", "calculate", "web_search", "web_fetch",
+        "task_create", "task_update", "task_get", "task_list",
+        "memory_get_profile", "memory_keyword", "memory_search",
+        "introspect_info", "introspect_source", "rename_session",
+    ])
+    require_confirm: list[str] = Field(default_factory=lambda: [
+        "run_command", "write_file", "edit_file",
+    ])
+    deny: list[str] = Field(default_factory=list)
+
+
 class ToolsConfig(BaseModel):
     enable_native: bool = True
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
+    permissions: ToolPermissionsConfig = Field(default_factory=ToolPermissionsConfig)
 
 
 class LongTermMemoryConfig(BaseModel):

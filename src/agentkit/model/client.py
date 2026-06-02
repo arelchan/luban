@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from agentkit.config.models import ModelConfig, ProviderConfig
 from agentkit.model.types import (
+    ContentPart,
     Message,
     ModelResponse,
     StreamChunk,
@@ -195,7 +196,10 @@ class ModelClient:
                         })
                     api_messages.append({"role": "assistant", "content": content_blocks})
                 else:
-                    api_messages.append({"role": m.role, "content": m.content or ""})
+                    if isinstance(m.content, list):
+                        api_messages.append({"role": m.role, "content": [p.to_anthropic_dict() for p in m.content]})
+                    else:
+                        api_messages.append({"role": m.role, "content": m.content or ""})
 
             body: dict[str, Any] = {
                 "model": model_name,

@@ -25,7 +25,9 @@ def set_runtime_context(
     lang_getter=None,
     subagent_executor=None,
     renderer=None,
+    tui=None,
     embedder=None,
+    scheduler=None,
 ) -> None:
     """Inject runtime state for session and introspection tools.
 
@@ -53,8 +55,12 @@ def set_runtime_context(
         _runtime_context["subagent_executor"] = subagent_executor
     if renderer is not None:
         _runtime_context["renderer"] = renderer
+    if tui is not None:
+        _runtime_context["tui"] = tui
     if embedder is not None:
         _runtime_context["embedder"] = embedder
+    if scheduler is not None:
+        _runtime_context["scheduler"] = scheduler
 
 
 def set_session_context(session_store, current_session_getter, current_session_setter) -> None:

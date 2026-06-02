@@ -10,11 +10,27 @@ def estimate_tokens(messages: list[Message]) -> int:
     """Estimate token count for a list of messages.
 
     Uses ~2 chars per token as a rough estimate (works for mixed Chinese/English).
+    Images are estimated at ~1000 tokens each.
     """
     total_chars = 0
     for m in messages:
-        if m.content and isinstance(m.content, str):
-            total_chars += len(m.content)
+        if m.content:
+            if isinstance(m.content, str):
+                total_chars += len(m.content)
+            elif isinstance(m.content, list):
+                for part in m.content:
+                    # Support both ContentPart objects and raw dicts (from deserialized sessions)
+                    if isinstance(part, dict):
+                        ptype = part.get("type", "")
+                        if ptype == "text" and part.get("text"):
+                            total_chars += len(part["text"])
+                        elif ptype == "image":
+                            total_chars += 2000
+                    else:
+                        if part.type == "text" and part.text:
+                            total_chars += len(part.text)
+                        elif part.type == "image":
+                            total_chars += 2000
         # Tool calls and metadata add overhead
         if m.tool_calls:
             for tc in m.tool_calls:

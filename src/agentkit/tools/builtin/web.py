@@ -23,7 +23,7 @@ def web_fetch(url: str, max_length: int = 10000) -> str:
         max_length: Maximum characters to return. Default 10000. Increase for long pages."""
     try:
         from agentkit import APP_NAME as _app_name
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=15.0, follow_redirects=True, trust_env=True) as client:
             resp = client.get(url, headers={"User-Agent": f"{_app_name}/1.0"})
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
@@ -83,6 +83,7 @@ def _search_brave(query: str, num_results: int, api_key: str) -> str:
             params={"q": query, "count": num_results, "text_decorations": 0},
             headers={"Accept": "application/json", "X-Subscription-Token": api_key},
             timeout=10.0,
+            trust_env=True,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -110,6 +111,7 @@ def _search_bing(query: str, num_results: int) -> str:
             },
             timeout=15.0,
             follow_redirects=True,
+            trust_env=True,
         )
         resp.raise_for_status()
         return _parse_bing_results(resp.text, num_results)
